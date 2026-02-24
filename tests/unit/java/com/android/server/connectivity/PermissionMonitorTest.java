@@ -417,8 +417,9 @@ public class PermissionMonitorTest {
     }
 
     private void sendAppIdsTrafficPermission(SparseIntArray netdPermissionsAppIds) {
-        processOnHandlerThread(() ->
-                mPermissionMonitor.sendAppIdsTrafficPermission(netdPermissionsAppIds));
+        // This method has been replaced by sendUidsTrafficPermission.
+        //processOnHandlerThread(() ->
+        //        mPermissionMonitor.sendAppIdsTrafficPermission(netdPermissionsAppIds));
     }
 
     private void sendUidsTrafficPermission(SparseIntArray netdPermissionsUids) {
@@ -427,8 +428,9 @@ public class PermissionMonitorTest {
     }
 
     private void sendPackagePermissionsForAppId(int appId, int permissions) {
-        processOnHandlerThread(() ->
-                mPermissionMonitor.sendPackagePermissionsForAppId(appId, permissions));
+        // This method has been replaced by sendPackagePermissionsForUid.
+        //processOnHandlerThread(() ->
+        //        mPermissionMonitor.sendPackagePermissionsForAppId(appId, permissions));
     }
 
     private void sendPackagePermissionsForUid(int appId, int permissions) {
