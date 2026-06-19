@@ -91,6 +91,11 @@ typedef struct {
 STRUCT_SIZE(PacketTrace, 8+4+4 + 4+4 + 2+2 + 1+1+1+1);
 
 typedef struct {
+    uint32_t uid;
+} BlockedSoBindToDevice;
+STRUCT_SIZE(BlockedSoBindToDevice, 4);
+
+typedef struct {
     uint64_t cookie;
 } SkStorageValue;
 STRUCT_SIZE(SkStorageValue, 8);
@@ -153,6 +158,7 @@ ASSERT_STRING_EQUAL(XT_BPF_DENYLIST_PROG_PATH,  BPF_NETD_PATH "prog_netd_skfilte
 #define UID_PERMISSION_MAP_PATH BPF_NETD_PATH "map_netd_uid_permission_map"
 #define INGRESS_DISCARD_MAP_PATH BPF_NETD_PATH "map_netd_ingress_discard_map"
 #define PACKET_TRACE_RINGBUF_PATH BPF_NETD_PATH "map_netd_packet_trace_ringbuf"
+#define BLOCKED_SO_BIND_TO_DEVICE_RINGBUF_PATH BPF_NETD_PATH "map_netd_blocked_so_bind_to_device_rb"
 #define PACKET_TRACE_ENABLED_MAP_PATH BPF_NETD_PATH "map_netd_packet_trace_enabled_map"
 #define DATA_SAVER_ENABLED_MAP_PATH BPF_NETD_PATH "map_netd_data_saver_enabled_map"
 #define LOCAL_NET_ACCESS_MAP_PATH BPF_NETD_PATH "map_netd_local_net_access_map"

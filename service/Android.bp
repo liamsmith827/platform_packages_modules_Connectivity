@@ -137,6 +137,7 @@ cc_library_shared {
     srcs: [
         ":services.connectivity-netstats-jni-sources",
         "jni/com_android_server_connectivity_ClatCoordinator.cpp",
+        "jni/com_android_server_connectivity_BlockedSoBindToDeviceNotifier.cpp",
         "jni/onload.cpp",
     ],
     header_libs: [
@@ -144,6 +145,8 @@ cc_library_shared {
     ],
     static_libs: [
         "libclat",
+        // TODO: underscores?
+        "libblockedsobindtodevice",
         "libip_checksum",
         "libmodules-utils-build",
         "libnetjniutils",

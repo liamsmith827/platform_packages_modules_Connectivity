@@ -99,6 +99,11 @@ DEFINE_BPF_RINGBUF_EXT(packet_trace_ringbuf, PacketTrace, 32 * 1024,
                        AID_ROOT, AID_SYSTEM, 0060, "net_shared", DEFAULT_BPF_PIN_SUBDIR,
                        BPFLOADER_MAINLINE_U_VERSION, BPFLOADER_MAX_VER);
 
+// A ring buffer on which blocked setsockopt(SO_BINDTODEVICE) system call information is pushed.
+DEFINE_BPF_RINGBUF_EXT(blocked_so_bind_to_device_rb, BlockedSoBindToDevice, 4 * 1024,
+                       AID_ROOT, AID_SYSTEM, 0060, "net_shared", DEFAULT_BPF_PIN_SUBDIR,
+                       BPFLOADER_MAINLINE_U_VERSION, BPFLOADER_MAX_VER);
+
 DEFINE_BPF_MAP_RO_NETD(data_saver_enabled_map, ARRAY, uint32_t, bool, 1)
 
 DEFINE_BPF_MAP_EXT(local_net_access_map, LPM_TRIE, LocalNetAccessKey, bool, 1000,
@@ -940,6 +945,17 @@ DEFINE_NETD_V_BPF_PROG_KVER(setsockopt, prog, , 5_8)
 
     UidOwnerValue* uidEntry = bpf_uid_owner_map_lookup_elem(&uid);
     uint32_t uidRule = uidEntry ? uidEntry->rule : 0;
+
+
+    // TODO: At this stage just push every call to test.
+    if (ctx-> level == SOL_SOCKET && ctx->optname == SO_BINDTODEVICE) {
+        // TODO: Maybe renamed to BlockedSoBindToDevice and blocked_so_bind_to_device_rb
+        BlockedSoBindToDevice* blocked = bpf_blocked_so_bind_to_device_rb_reserve();
+        if (blocked != NULL) {
+            blocked->uid = uid;
+            bpf_blocked_so_bind_to_device_rb_submit(blocked);
+        }
+    }
 
     if (!(uidRule & LOCKDOWN_VPN_MATCH)) {
         return SETSOCKOPT_ALLOWED;

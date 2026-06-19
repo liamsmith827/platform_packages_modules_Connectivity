@@ -1,0 +1,26 @@
+package {
+    default_team: "trendy_team_fwk_core_networking",
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+cc_library_static {
+    name: "libblockedsobindtodevice",
+    defaults: ["netd_defaults"],
+    srcs: [
+        "BlockedSoBindToDevicePoller.cpp",
+    ],
+    stl: "libc++_static",
+    header_libs: [
+        "bpf_connectivity_headers",
+    ],
+    static_libs: [
+        "libip_checksum",
+    ],
+    shared_libs: [
+        "liblog",
+        "libbase",
+    ],
+    export_include_dirs: ["include"],
+    min_sdk_version: "30",
+    apex_available: ["com.android.tethering"],
+}

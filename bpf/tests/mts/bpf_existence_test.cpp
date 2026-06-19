@@ -136,6 +136,7 @@ static const set<string> MAINLINE_FOR_U_PLUS = {
     NETD "map_netd_packet_trace_enabled_map",
 };
 
+// TODO: Add our new ringbuf here as well?
 // Provided by *current* mainline module for U+ devices with 5.10+ kernels
 static const set<string> MAINLINE_FOR_U_5_10_PLUS = {
     NETD "map_netd_packet_trace_ringbuf",

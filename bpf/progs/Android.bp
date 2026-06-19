@@ -51,6 +51,7 @@ cc_library_headers {
         "//packages/modules/Connectivity/bpf/netd",
         "//packages/modules/Connectivity/service",
         "//packages/modules/Connectivity/service/native/libs/libclat",
+        "//packages/modules/Connectivity/service/native/libs/libblockedsobindtodevice",
         "//packages/modules/Connectivity/Tethering",
         "//packages/modules/Connectivity/service/native",
         "//packages/modules/Connectivity/tests/native/connectivity_native_test",
