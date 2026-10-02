@@ -80,6 +80,7 @@ import static android.net.ConnectivityManager.TYPE_WIFI;
 import static android.net.ConnectivityManager.TYPE_WIFI_P2P;
 import static android.net.ConnectivityManager.getNetworkTypeName;
 import static android.net.ConnectivityManager.isNetworkTypeValid;
+import static android.net.ConnectivitySettingsManager.PRIVATE_DNS_MODE_OFF;
 import static android.net.ConnectivitySettingsManager.PRIVATE_DNS_MODE_OPPORTUNISTIC;
 import static android.net.INetd.LOCAL_NET_ID;
 import static android.net.INetd.PERMISSION_INTERNET;
@@ -202,6 +203,7 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.res.XmlResourceParser;
 import android.database.ContentObserver;
+import android.ext.ConnectivityUtil.NetworkType;
 import android.net.BpfNetMapsUtils;
 import android.net.CaptivePortal;
 import android.net.CaptivePortalData;
@@ -212,6 +214,7 @@ import android.net.ConnectivityManager;
 import android.net.ConnectivityManager.BlockedReason;
 import android.net.ConnectivityManager.NetworkCallback;
 import android.net.ConnectivityManager.RestrictBackgroundStatus;
+import android.net.GlobalOrUserId;
 import android.net.NetworkCapabilities.RedactionHelper;
 import android.net.ConnectivitySettingsManager;
 import android.net.DataStallReportParcelable;
@@ -282,6 +285,7 @@ import android.net.UnderlyingNetworkInfo;
 import android.net.Uri;
 import android.net.VpnManager;
 import android.net.VpnTransportInfo;
+import android.net.ext.INetdExt;
 import android.net.metrics.IpConnectivityLog;
 import android.net.metrics.NetworkEvent;
 import android.net.netd.aidl.NativeUidRangeConfig;
@@ -433,8 +437,6 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.io.PrintWriter;
 import java.io.Writer;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.net.Inet4Address;
 import java.net.Inet6Address;
 import java.net.InetAddress;
@@ -633,6 +635,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
     protected IDnsResolver mDnsResolver;
     @VisibleForTesting
     protected INetd mNetd;
+    private final INetdExt mNetdExt;
     private DscpPolicyTracker mDscpPolicyTracker = null;
     private final NetworkStatsManager mStatsManager;
     private final NetworkPolicyManager mPolicyManager;
@@ -1003,6 +1006,8 @@ public class ConnectivityService extends IConnectivityManager.Stub
      */
     private static final int EVENT_TIMEOUT_NETWORK_SUSPENDED = 64;
 
+    private static final int EVENT_VPN_PRIVATE_DNS_SETTINGS_CHANGED = Integer.MAX_VALUE;
+
     /**
      * Argument for {@link #EVENT_PROVISIONING_NOTIFICATION} to indicate that the notification
      * should be shown.
@@ -1180,6 +1185,10 @@ public class ConnectivityService extends IConnectivityManager.Stub
     @Nullable @VisibleForTesting final Map<InetAddress, Set<NetworkAgentInfo>> mIpToNetworksMap;
     // NetlinkMonitor for ConnectivityService
     @Nullable private final AddressUpdateMonitor mAddressUpdateMonitor;
+
+    // Usually this can be referred to as just the default network, but this class also deals with
+    // app default networks and there's an mDefaultNetwork in an inner class already.
+    @Nullable private NetworkAgentInfo mSystemDefaultNetwork;
 
     /**
      * Implements support for the legacy "one network per network type" model.
@@ -2149,6 +2158,18 @@ public class ConnectivityService extends IConnectivityManager.Stub
         mWakeUpMask = mask;
 
         mNetd = netd;
+
+        IBinder netdExt;
+        try {
+            netdExt = mNetd.asBinder().getExtension();
+        } catch (RemoteException e) {
+            throw new IllegalStateException(e);
+        }
+        if (netdExt == null) {
+            throw new IllegalStateException("missing netd binder extension");
+        }
+        mNetdExt = INetdExt.Stub.asInterface(netdExt);
+
         mInterfaceTracker = mDeps.getInterfaceTracker(mContext);
         mBpfNetMaps = mDeps.getBpfNetMaps(mContext, netd, mInterfaceTracker);
         mHandlerThread = mDeps.makeHandlerThread("ConnectivityServiceThread");
@@ -2560,8 +2581,18 @@ public class ConnectivityService extends IConnectivityManager.Stub
     }
 
     private void registerPrivateDnsSettingsCallbacks() {
-        for (Uri uri : DnsManager.getPrivateDnsSettingsUris()) {
+        for (Uri uri : DnsManager.getPrivateDnsSettingsUris(NetworkType.PHYSICAL)) {
             mSettingsObserver.observe(uri, EVENT_PRIVATE_DNS_SETTINGS_CHANGED);
+        }
+        for (Uri uri : DnsManager.getPrivateDnsSettingsUris(NetworkType.VPN)) {
+            // We don't want to be notified when users are added/removed or on system startup as
+            // there will either be no VPN in which case it's a no-op, or there somehow is a VPN
+            // that early and then this would just retrigger the same code that's already been
+            // executed. Being notified would also be a deviation from upstream's
+            // EVENT_PRIVATE_DNS_SETTINGS_CHANGED handling, which we want to avoid. Refer to
+            // SettingsObserver for full explanation of the parameter.
+            mSettingsObserver.observeForAllUsers(uri, EVENT_VPN_PRIVATE_DNS_SETTINGS_CHANGED,
+                    SettingsObserver.NotifyOnUsersChanged.FALSE);
         }
     }
 
@@ -5340,7 +5371,6 @@ public class ConnectivityService extends IConnectivityManager.Stub
                 }
                 case EVENT_PRIVATE_DNS_CONFIG_RESOLVED: {
                     if (nai == null) break;
-
                     updatePrivateDns(nai, (PrivateDnsConfig) msg.obj);
                     break;
                 }
@@ -5682,19 +5712,27 @@ public class ConnectivityService extends IConnectivityManager.Stub
         if (nai == null) return;
         // If the Private DNS mode is opportunistic, reprogram the DNS servers
         // in order to restart a validation pass from within netd.
-        final PrivateDnsConfig cfg = mDnsManager.getPrivateDnsConfig();
+        // TODO: Should this also be done for all VPN networks that use nai as underlying
+        // physical network?
+        GlobalOrUserId networkTarget = mDnsManager.getNetworkTarget(nai);
+        if (networkTarget == null) {
+            return;
+        }
+        final PrivateDnsConfig cfg = mDnsManager.getPrivateDnsConfig(networkTarget);
         if (cfg.inOpportunisticMode()) {
             updateDnses(nai.linkProperties, null, nai.network.getNetId());
         }
     }
 
-    private void handlePrivateDnsSettingsChanged() {
-        final PrivateDnsConfig cfg = mDnsManager.getPrivateDnsConfig();
-
+    private void handlePrivateDnsSettingsChanged(GlobalOrUserId target) {
         forEachNetworkAgentInfo(nai -> {
-            handlePerNetworkPrivateDnsConfig(nai, cfg);
-            if (networkRequiresPrivateDnsValidation(nai)) {
-                handleUpdateLinkProperties(nai, new LinkProperties(nai.linkProperties));
+            GlobalOrUserId networkTarget = mDnsManager.getNetworkTarget(nai);
+            if (networkTarget != null && networkTarget.equals(target)) {
+                final PrivateDnsConfig cfg = mDnsManager.getPrivateDnsConfig(networkTarget);
+                handlePerNetworkPrivateDnsConfig(nai, cfg);
+                if (networkRequiresPrivateDnsValidation(nai)) {
+                    handleUpdateLinkProperties(nai, new LinkProperties(nai.linkProperties));
+                }
             }
         });
     }
@@ -5704,15 +5742,18 @@ public class ConnectivityService extends IConnectivityManager.Stub
         // Internet access and therefore also require validation.
         if (!networkRequiresPrivateDnsValidation(nai)) return;
 
-        // Notify the NetworkAgentInfo/NetworkMonitor in case NetworkMonitor needs to cancel or
-        // schedule DNS resolutions. If a DNS resolution is required the
-        // result will be sent back to us.
-        nai.networkMonitor().notifyPrivateDnsChanged(cfg.toParcel());
-
         // With Private DNS bypass support, we can proceed to update the
         // Private DNS config immediately, even if we're in strict mode
         // and have not yet resolved the provider name into a set of IPs.
         updatePrivateDns(nai, cfg);
+
+        // Notify the NetworkAgentInfo/NetworkMonitor in case NetworkMonitor needs to cancel or
+        // schedule DNS resolutions. If a DNS resolution is required the
+        // result will be sent back to us.
+        // This must be done after updatePrivateDns(), otherwise the private DNS mode might not yet
+        // have been set in PrivateDnsConfiguration at the time NetworkMonitor probes and the
+        // probe would use non-private DNS.
+        nai.networkMonitor().notifyPrivateDnsChanged(cfg.toParcel());
     }
 
     private void updatePrivateDns(NetworkAgentInfo nai, PrivateDnsConfig newCfg) {
@@ -5727,6 +5768,32 @@ public class ConnectivityService extends IConnectivityManager.Stub
         }
         mDnsManager.updatePrivateDnsValidation(update);
         handleUpdateLinkProperties(nai, new LinkProperties(nai.linkProperties));
+    }
+
+    /**
+     * When the default network changes, a non-lockdown VPN that's using strict private DNS might
+     * gain or lose routes that it can potentially access its DNS servers on. This method ensures
+     * that these new routes are considered.
+     */
+    private void handleDefaultNetworkChanged() {
+        NetworkAgentInfo oldDefaultNetwork = mDnsManager.getDefaultNetwork();
+        mDnsManager.setDefaultNetwork(mSystemDefaultNetwork);
+
+        List<Integer> netIds = mDnsManager.getNonLockdownVpnsUsingStrictPrivateDns();
+        for (Integer netId : netIds) {
+            NetworkAgentInfo nai = getNetworkAgentInfoForNetId(netId);
+            if (nai == null) {
+                continue;
+            }
+            if (networkRequiresPrivateDnsValidation(nai)
+                    && mDnsManager.shouldSendStrictModeUpdate(netId, nai.linkProperties,
+                    nai.linkProperties, oldDefaultNetwork, mSystemDefaultNetwork)) {
+                // We can't just call handleUpdateLinkProperties() because its call to updateDnses()
+                // won't detect the default network change.
+                updateDnses(nai.linkProperties, null, nai.network.getNetId());
+                handleUpdateLinkProperties(nai, new LinkProperties(nai.linkProperties));
+            }
+        }
     }
 
     private void handleNat64PrefixEvent(int netId, int operation, String prefixAddress,
@@ -6125,10 +6192,11 @@ public class ConnectivityService extends IConnectivityManager.Stub
             // This should never fail.  Specifying an already in use NetID will cause failure.
             final NativeNetworkConfig config;
             if (nai.isVPN()) {
-                if (getVpnType(nai) == VpnManager.TYPE_VPN_NONE) {
-                    Log.wtf(TAG, "Unable to get VPN type from network " + nai.toShortString());
-                    return false;
-                }
+                // This doesn't ensure that netd never creates a virtual network that is not of a
+                // supported type, because the netd API can be called from elsewhere. This does
+                // ensure such networks will never have an owner set (in netd).
+                checkSupportedVpnType(nai);
+
                 config = new NativeNetworkConfig(nai.network.getNetId(), NativeNetworkType.VIRTUAL,
                         INetd.PERMISSION_NONE,
                         !nai.networkAgentConfig.allowBypass /* secure */,
@@ -6143,6 +6211,9 @@ public class ConnectivityService extends IConnectivityManager.Stub
                         false /* excludeLocalRoutes */);
             }
             mNetd.networkCreate(config);
+            // Unfortunately we can't set this during network creation (refer to AIDL comment for
+            // explanation).
+            mNetdExt.networkSetOwner(config.netId, nai.networkCapabilities.getOwnerUid());
             mDnsResolver.createNetworkCache(nai.network.getNetId());
             mDnsManager.updateCapabilitiesForNetwork(nai.network.getNetId(),
                     nai.networkCapabilities);
@@ -7446,7 +7517,10 @@ public class ConnectivityService extends IConnectivityManager.Stub
                     break;
                 }
                 case EVENT_PRIVATE_DNS_SETTINGS_CHANGED:
-                    handlePrivateDnsSettingsChanged();
+                    handlePrivateDnsSettingsChanged(GlobalOrUserId.GLOBAL);
+                    break;
+                case EVENT_VPN_PRIVATE_DNS_SETTINGS_CHANGED:
+                    handlePrivateDnsSettingsChanged(GlobalOrUserId.userId(msg.arg1));
                     break;
                 case EVENT_PRIVATE_DNS_VALIDATION_UPDATE:
                     handlePrivateDnsValidationUpdate(
@@ -7818,17 +7892,33 @@ public class ConnectivityService extends IConnectivityManager.Stub
     }
 
     private static class SettingsObserver extends ContentObserver {
+
+        private enum NotifyOnUsersChanged {
+            TRUE,
+            FALSE
+        }
+
         private final HashMap<Uri, SettingInfo> mUriEventMap;
         private final Context mContext;
         private final Handler mHandler;
         private final Dependencies mDeps;
 
         private static class SettingInfo {
+
             final int what;
             final boolean forAllUsers;
-            SettingInfo(int what, boolean forAllUsers) {
+            // Whether to queue a message when a user is added/removed (referred to by upstream as
+            // "usersChanged"). Because of BroadcastReceiveHelper.callOnUserAddedForExistingUsers(),
+            // "user added" messages are also queued for all existing users on system startup.
+            final NotifyOnUsersChanged notifyOnUsersChanged;
+
+            SettingInfo(int what, boolean forAllUsers, NotifyOnUsersChanged notifyOnUsersChanged) {
                 this.what = what;
                 this.forAllUsers = forAllUsers;
+                if (!forAllUsers && notifyOnUsersChanged == NotifyOnUsersChanged.TRUE) {
+                    throw new IllegalArgumentException();
+                }
+                this.notifyOnUsersChanged = notifyOnUsersChanged;
             }
         }
 
@@ -7850,9 +7940,14 @@ public class ConnectivityService extends IConnectivityManager.Stub
          * @param what The empty message to send whenever the setting changes.
          */
         void observe(Uri uri, int what) {
-            mUriEventMap.put(uri, new SettingInfo(what, false /* forAllUsers */));
+            mUriEventMap.put(uri, new SettingInfo(what, false /* forAllUsers */,
+                    NotifyOnUsersChanged.FALSE));
             final ContentResolver resolver = mContext.getContentResolver();
             mDeps.registerContentObserver(resolver, uri, false, this);
+        }
+
+        void observeForAllUsers(Uri uri, int what) {
+            observeForAllUsers(uri, what, NotifyOnUsersChanged.TRUE);
         }
 
         /**
@@ -7864,26 +7959,30 @@ public class ConnectivityService extends IConnectivityManager.Stub
          * @param uri The URI to observe.
          * @param what The empty message to send whenever the setting changes.
          */
-        void observeForAllUsers(Uri uri, int what) {
+        void observeForAllUsers(Uri uri, int what, NotifyOnUsersChanged notifyOnUsersChanged) {
             if (!SdkLevel.isAtLeastT()) {
                 observe(uri, what);
                 return;
             }
-            mUriEventMap.put(uri, new SettingInfo(what, true /* forAllUsers */));
+            mUriEventMap.put(uri, new SettingInfo(what, true /* forAllUsers */,
+                    notifyOnUsersChanged));
             final ContentResolver resolver = mContext.getContentResolver();
             mDeps.registerContentObserverAsUser(resolver, uri, false, this, UserHandle.ALL);
         }
 
-        void onUsersChanged() {
+        void onUsersChanged(UserHandle user) {
             for (SettingInfo si : mUriEventMap.values()) {
-                if (si.forAllUsers) {
-                    sendMessage(si.what);
+                if (si.forAllUsers
+                        && si.notifyOnUsersChanged == NotifyOnUsersChanged.TRUE) {
+                    sendMessage(si.what, user.getIdentifier());
                 }
             }
         }
 
-        private void sendMessage(int what) {
-            mHandler.obtainMessage(what).sendToTarget();
+        private void sendMessage(int what, int userId) {
+            Message m = mHandler.obtainMessage(what);
+            m.arg1 = userId;
+            m.sendToTarget();
         }
 
         @Override
@@ -7892,20 +7991,15 @@ public class ConnectivityService extends IConnectivityManager.Stub
         }
 
         @Override
-        public void onChange(boolean selfChange, Uri uri) {
-            final SettingInfo si = mUriEventMap.get(uri);
-            if (si != null) {
-                sendMessage(si.what);
-            } else {
-                loge("No matching event to send for URI=" + uri);
-            }
-        }
-
-        @Override
         public void onChange(boolean selfChange, @NonNull Collection<Uri> uris,
-                int flags, UserHandle unused) {
+                int flags, UserHandle user) {
             for (Uri uri : uris) {
-                onChange(selfChange, uri);
+                final SettingInfo si = mUriEventMap.get(uri);
+                if (si != null) {
+                    sendMessage(si.what, user.getIdentifier());
+                } else {
+                    loge("No matching event to send for URI=" + uri);
+                }
             }
         }
     }
@@ -8218,7 +8312,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
         if (mSatelliteAccessController != null) {
             mSatelliteAccessController.onUserAddedWithInstalledPackageList(user, apps);
         }
-        mSettingsObserver.onUsersChanged();
+        mSettingsObserver.onUsersChanged(user);
     }
 
     @Override
@@ -8237,7 +8331,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
         if (mSatelliteAccessController != null) {
             mSatelliteAccessController.onUserRemoved(user);
         }
-        mSettingsObserver.onUsersChanged();
+        mSettingsObserver.onUsersChanged(user);
     }
 
     @Override
@@ -10361,6 +10455,9 @@ public class ConnectivityService extends IConnectivityManager.Stub
         // This does not need to be done before updateDnses because the
         // LinkProperties are not the source of the private DNS configuration.
         // updateDnses will fetch the private DNS configuration from DnsManager.
+        // In fact, updateDnses() must be done before updatePrivateDnsStatus() because the former
+        // calls sendDnsConfigurationForNetwork() which updates the tracked private DNS servers that
+        // the latter accesses.
         mDnsManager.updatePrivateDnsStatus(netId, newLp);
 
         if (isDefaultNetwork(networkAgent)) {
@@ -10901,7 +10998,12 @@ public class ConnectivityService extends IConnectivityManager.Stub
 
     private void updateDnses(@NonNull LinkProperties newLp, @Nullable LinkProperties oldLp,
             int netId) {
-        if (oldLp != null && newLp.isIdenticalDnses(oldLp)) {
+        // We could additionally check if the routes changed in a way which would enable an
+        // opportunistic DNS server to now be reachable, but it's rare that a network would ever set
+        // unreachable DNS servers, and opportunistic is only ever a best-effort attempt.
+        if (oldLp != null
+                && newLp.isIdenticalDnses(oldLp)
+                && !mDnsManager.shouldSendStrictModeUpdate(netId, oldLp, newLp)) {
             return;  // no updating necessary
         }
 
@@ -10911,7 +11013,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
         }
         try {
             mDnsManager.noteDnsServersForNetwork(netId, newLp);
-            mDnsManager.flushVmDnsCache();
+            mDnsManager.flushVmDnsCache(getNetworkAgentInfoForNetId(netId));
         } catch (Exception e) {
             loge("Exception in setDnsConfigurationForNetwork: " + e);
         }
@@ -12067,7 +12169,12 @@ public class ConnectivityService extends IConnectivityManager.Stub
     }
 
     private void processDefaultNetworkChanges(@NonNull final NetworkReassignment changes) {
+        int originalSystemDefaultNetworkId = mSystemDefaultNetwork == null ? NETID_UNSET :
+                mSystemDefaultNetwork.network.getNetId();
+
+        // Whether an app-specific or the system default network changed.
         boolean isDefaultChanged = false;
+
         for (final NetworkRequestInfo defaultRequestInfo : mDefaultNetworkRequests) {
             final NetworkReassignment.RequestReassignment reassignment =
                     changes.getReassignment(defaultRequestInfo);
@@ -12083,6 +12190,12 @@ public class ConnectivityService extends IConnectivityManager.Stub
         if (isDefaultChanged) {
             // Hold a wakelock for a short time to help apps in migrating to a new default.
             scheduleReleaseNetworkTransitionWakelock();
+        }
+
+        int newSystemDefaultNetworkId = mSystemDefaultNetwork == null ? NETID_UNSET :
+                mSystemDefaultNetwork.network.getNetId();
+        if (newSystemDefaultNetworkId != originalSystemDefaultNetworkId) {
+            handleDefaultNetworkChanged();
         }
     }
 
@@ -12112,7 +12225,6 @@ public class ConnectivityService extends IConnectivityManager.Stub
         oldDefaultNetwork.linkProperties.setHttpProxy(new ProxyInfo(proxyInfo.getPacFileUrl()));
         notifyNetworkCallbacks(oldDefaultNetwork, CALLBACK_IP_CHANGED);
     }
-
     private void makeDefault(@NonNull final NetworkRequestInfo nri,
             @Nullable final NetworkAgentInfo oldDefaultNetwork,
             @Nullable final NetworkAgentInfo newDefaultNetwork) {
@@ -12256,6 +12368,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
             } else {
                 mNetd.networkClearDefault();
             }
+            mSystemDefaultNetwork = newDefaultNetwork;
         } catch (RemoteException | ServiceSpecificException e) {
             loge("Exception setting default network :" + e);
         }
@@ -12962,7 +13075,12 @@ public class ConnectivityService extends IConnectivityManager.Stub
             // NetworkMonitor, otherwise NetworkMonitor cannot determine if validation is required.
             networkAgent.getAndSetNetworkCapabilities(networkAgent.networkCapabilities);
 
-            handlePerNetworkPrivateDnsConfig(networkAgent, mDnsManager.getPrivateDnsConfig());
+            GlobalOrUserId networkTarget = mDnsManager.getNetworkTarget(networkAgent);
+            if (networkTarget != null) {
+                handlePerNetworkPrivateDnsConfig(networkAgent, mDnsManager.getPrivateDnsConfig(
+                        networkTarget));
+            }
+
             if (!(shouldCreateNetworksImmediately(networkAgent.getCapsNoCopy())
                     || shouldUpdateLinkPropertiesEarlyForVPNNetwork(networkAgent))) {
                 applyInitialLinkProperties(networkAgent);
@@ -13437,6 +13555,12 @@ public class ConnectivityService extends IConnectivityManager.Stub
                 ConnectivitySettingsManager.setPrivateDnsMode(mContext,
                         PRIVATE_DNS_MODE_OPPORTUNISTIC);
             }
+            // Neither upstream or us are resetting the default private DNS mode, which is fine
+            // because it is not currently settable anywhere.
+            for (UserHandle user : mUserManager.getUserHandles(true)) {
+                ConnectivitySettingsManager.setPrivateDnsMode(mContext, PRIVATE_DNS_MODE_OFF,
+                        GlobalOrUserId.userId(user.getIdentifier()));
+            }
 
             Settings.Global.putString(mContext.getContentResolver(),
                     ConnectivitySettingsManager.NETWORK_AVOID_BAD_WIFI, null);
@@ -13733,14 +13857,32 @@ public class ConnectivityService extends IConnectivityManager.Stub
         }
     }
 
-    private int getVpnType(@Nullable NetworkAgentInfo vpn) {
+    /**
+     * There are a large number of VPN types but only a small number of them are supported by
+     * GrapheneOS. This checks that the provided VPN is of one of the supported types.
+     * @param nai A VPN network.
+     * @throws IllegalStateException If a VPN has an unsupported type.
+     */
+    public static void checkSupportedVpnType(NetworkAgentInfo nai) {
+        int vpnType = ConnectivityService.getVpnType(nai);
+        // Although TYPE_VPN_LEGACY still exists, it's not possible for a VPN to have this type
+        // since LegacyVpnRunner has been removed entirely. The Settings-based VPNs are all
+        // TYPE_VPN_PLATFORM. Note that TYPE_VPN_PLATFORM is not supported to the extent
+        // TYPE_VPN_SERVICE is. Strict leak protection is only provided for the latter.
+        if (!(vpnType == VpnManager.TYPE_VPN_SERVICE ||
+                vpnType == VpnManager.TYPE_VPN_PLATFORM)) {
+            throw new IllegalStateException("unsupported VPN type encountered");
+        }
+    }
+
+    public static int getVpnType(@Nullable NetworkAgentInfo vpn) {
         if (vpn == null) return VpnManager.TYPE_VPN_NONE;
         final TransportInfo ti = vpn.networkCapabilities.getTransportInfo();
         if (!(ti instanceof VpnTransportInfo)) return VpnManager.TYPE_VPN_NONE;
         return ((VpnTransportInfo) ti).getType();
     }
 
-    private boolean isVpnServiceVpn(NetworkAgentInfo nai) {
+    private static boolean isVpnServiceVpn(NetworkAgentInfo nai) {
         final int vpnType = getVpnType(nai);
         return vpnType == VpnManager.TYPE_VPN_SERVICE || vpnType == VpnManager.TYPE_VPN_OEM_SERVICE;
     }

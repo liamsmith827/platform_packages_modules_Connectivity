@@ -44,6 +44,7 @@ import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.net.ConnectivityManager;
 import android.net.ConnectivityManager.NetworkCallback;
+import android.net.GlobalOrUserId;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -458,8 +459,10 @@ public final class CtsNetUtils {
     }
 
     public void storePrivateDnsSetting() {
-        mOldPrivateDnsMode = ConnectivitySettingsUtils.getPrivateDnsMode(mContext);
-        mOldPrivateDnsSpecifier = ConnectivitySettingsUtils.getPrivateDnsHostname(mContext);
+        mOldPrivateDnsMode = ConnectivitySettingsUtils.getPrivateDnsMode(mContext,
+                GlobalOrUserId.GLOBAL);
+        mOldPrivateDnsSpecifier = ConnectivitySettingsUtils.getPrivateDnsHostname(mContext,
+                GlobalOrUserId.GLOBAL);
     }
 
     public void restorePrivateDnsSetting() throws InterruptedException {
@@ -470,15 +473,17 @@ public final class CtsNetUtils {
         if (mOldPrivateDnsMode != ConnectivitySettingsUtils.PRIVATE_DNS_MODE_PROVIDER_HOSTNAME) {
             // Also restore hostname even if the value is not used since private dns is not in
             // the strict mode to prevent setting being changed after test.
-            ConnectivitySettingsUtils.setPrivateDnsHostname(mContext, mOldPrivateDnsSpecifier);
-            ConnectivitySettingsUtils.setPrivateDnsMode(mContext, mOldPrivateDnsMode);
+            ConnectivitySettingsUtils.setPrivateDnsHostname(mContext, mOldPrivateDnsSpecifier,
+                    GlobalOrUserId.GLOBAL);
+            ConnectivitySettingsUtils.setPrivateDnsMode(mContext, mOldPrivateDnsMode,
+                    GlobalOrUserId.GLOBAL);
             return;
         }
         // restore private DNS setting
         // In case of invalid setting, set to opportunistic to avoid a bad state and fail
         if (TextUtils.isEmpty(mOldPrivateDnsSpecifier)) {
             ConnectivitySettingsUtils.setPrivateDnsMode(mContext,
-                    ConnectivitySettingsUtils.PRIVATE_DNS_MODE_OPPORTUNISTIC);
+                    ConnectivitySettingsUtils.PRIVATE_DNS_MODE_OPPORTUNISTIC, GlobalOrUserId.GLOBAL);
             fail("Invalid private DNS setting: no hostname specified in strict mode");
         }
         setPrivateDnsStrictMode(mOldPrivateDnsSpecifier);
@@ -494,12 +499,14 @@ public final class CtsNetUtils {
         // To reduce flake rate, set PRIVATE_DNS_SPECIFIER before PRIVATE_DNS_MODE. This ensures
         // that if the previous private DNS mode was not strict, the system only sees one
         // EVENT_PRIVATE_DNS_SETTINGS_CHANGED event instead of two.
-        ConnectivitySettingsUtils.setPrivateDnsHostname(mContext, server);
-        final int mode = ConnectivitySettingsUtils.getPrivateDnsMode(mContext);
+        ConnectivitySettingsUtils.setPrivateDnsHostname(mContext, server, GlobalOrUserId.GLOBAL);
+        final int mode = ConnectivitySettingsUtils.getPrivateDnsMode(mContext,
+                GlobalOrUserId.GLOBAL);
         // If current private DNS mode is strict, we only need to set PRIVATE_DNS_SPECIFIER.
         if (mode != ConnectivitySettingsUtils.PRIVATE_DNS_MODE_PROVIDER_HOSTNAME) {
             ConnectivitySettingsUtils.setPrivateDnsMode(mContext,
-                    ConnectivitySettingsUtils.PRIVATE_DNS_MODE_PROVIDER_HOSTNAME);
+                    ConnectivitySettingsUtils.PRIVATE_DNS_MODE_PROVIDER_HOSTNAME,
+                    GlobalOrUserId.GLOBAL);
         }
     }
 

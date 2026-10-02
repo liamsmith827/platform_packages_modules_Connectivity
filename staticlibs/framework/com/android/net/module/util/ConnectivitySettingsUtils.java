@@ -16,10 +16,15 @@
 
 package com.android.net.module.util;
 
+import static android.net.ConnectivitySettingsManager.VPN_PRIVATE_DNS_MODE;
+import static android.net.ConnectivitySettingsManager.VPN_PRIVATE_DNS_SPECIFIER;
+import static android.net.ConnectivitySettingsManager.VPN_PRIVATE_DNS_DEFAULT_MODE;
+
 import android.annotation.NonNull;
 import android.annotation.Nullable;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.net.GlobalOrUserId;
 import android.provider.Settings;
 import android.text.TextUtils;
 
@@ -64,11 +69,16 @@ public class ConnectivitySettingsUtils {
         }
     }
 
-    private static int getPrivateDnsModeAsInt(String mode) {
+    private static int getPrivateDnsModeAsInt(String mode, GlobalOrUserId target) {
         // If both PRIVATE_DNS_MODE and PRIVATE_DNS_DEFAULT_MODE are not set, choose
-        // PRIVATE_DNS_MODE_OPPORTUNISTIC as default mode.
-        if (TextUtils.isEmpty(mode))
-            return PRIVATE_DNS_MODE_OPPORTUNISTIC;
+        // PRIVATE_DNS_MODE_OPPORTUNISTIC as default mode for physical private DNS and
+        // PRIVATE_DNS_MODE_OFF for VPN private DNS.
+        if (TextUtils.isEmpty(mode)) {
+            if (target.isGlobal()) {
+                return PRIVATE_DNS_MODE_OPPORTUNISTIC;
+            }
+            return PRIVATE_DNS_MODE_OFF;
+        }
         switch (mode) {
             case "off":
                 return PRIVATE_DNS_MODE_OFF;
@@ -80,7 +90,10 @@ public class ConnectivitySettingsUtils {
                 // b/260211513: adb shell settings put global private_dns_mode foo
                 // can result in arbitrary strings - treat any unknown value as empty string.
                 // throw new IllegalArgumentException("Invalid private dns mode: " + mode);
-                return PRIVATE_DNS_MODE_OPPORTUNISTIC;
+                if (target.isGlobal()) {
+                    return PRIVATE_DNS_MODE_OPPORTUNISTIC;
+                }
+                return PRIVATE_DNS_MODE_OFF;
         }
     }
 
@@ -107,11 +120,24 @@ public class ConnectivitySettingsUtils {
      * @param context The Context to query the private DNS mode from settings.
      * @return An integer of private DNS mode.
      */
-    public static int getPrivateDnsMode(@NonNull Context context) {
+    public static int getPrivateDnsMode(@NonNull Context context, @NonNull GlobalOrUserId target) {
         final ContentResolver cr = context.getContentResolver();
-        String mode = Settings.Global.getString(cr, PRIVATE_DNS_MODE);
-        if (TextUtils.isEmpty(mode)) mode = Settings.Global.getString(cr, PRIVATE_DNS_DEFAULT_MODE);
-        return getPrivateDnsModeAsInt(mode);
+        String mode;
+        if (target.isGlobal()) {
+            mode = Settings.Global.getString(cr, PRIVATE_DNS_MODE);
+        } else {
+            mode = Settings.Secure.getStringForUser(cr, VPN_PRIVATE_DNS_MODE,
+                    target.getUserId());
+        }
+        if (TextUtils.isEmpty(mode)) {
+            if (target.isGlobal()) {
+                mode = Settings.Global.getString(cr, PRIVATE_DNS_DEFAULT_MODE);
+            } else {
+                mode = Settings.Secure.getStringForUser(cr, VPN_PRIVATE_DNS_DEFAULT_MODE,
+                        target.getUserId());
+            }
+        }
+        return getPrivateDnsModeAsInt(mode, target);
     }
 
     /**
@@ -120,14 +146,20 @@ public class ConnectivitySettingsUtils {
      * @param context The {@link Context} to set the private DNS mode.
      * @param mode The private dns mode. This should be one of the PRIVATE_DNS_MODE_* constants.
      */
-    public static void setPrivateDnsMode(@NonNull Context context, int mode) {
+    public static void setPrivateDnsMode(@NonNull Context context, int mode,
+            @NonNull GlobalOrUserId target) {
         if (!(mode == PRIVATE_DNS_MODE_OFF
                 || mode == PRIVATE_DNS_MODE_OPPORTUNISTIC
                 || mode == PRIVATE_DNS_MODE_PROVIDER_HOSTNAME)) {
             throw new IllegalArgumentException("Invalid private dns mode: " + mode);
         }
-        Settings.Global.putString(context.getContentResolver(), PRIVATE_DNS_MODE,
-                getPrivateDnsModeAsString(mode));
+        if (target.isGlobal()) {
+            Settings.Global.putString(context.getContentResolver(), PRIVATE_DNS_MODE,
+                    getPrivateDnsModeAsString(mode));
+        } else {
+            Settings.Secure.putStringForUser(context.getContentResolver(), VPN_PRIVATE_DNS_MODE,
+                    getPrivateDnsModeAsString(mode), target.getUserId());
+        }
     }
 
     /**
@@ -137,8 +169,13 @@ public class ConnectivitySettingsUtils {
      * @return The specific private dns provider name, or null if no setting value.
      */
     @Nullable
-    public static String getPrivateDnsHostname(@NonNull Context context) {
-        return Settings.Global.getString(context.getContentResolver(), PRIVATE_DNS_SPECIFIER);
+    public static String getPrivateDnsHostname(@NonNull Context context,
+            @NonNull GlobalOrUserId target) {
+        if (target.isGlobal()) {
+            return Settings.Global.getString(context.getContentResolver(), PRIVATE_DNS_SPECIFIER);
+        }
+        return Settings.Secure.getStringForUser(context.getContentResolver(),
+                VPN_PRIVATE_DNS_SPECIFIER, target.getUserId());
     }
 
     /**
@@ -147,8 +184,16 @@ public class ConnectivitySettingsUtils {
      * @param context The {@link Context} to set the setting.
      * @param specifier The specific private dns provider name.
      */
-    public static void setPrivateDnsHostname(@NonNull Context context, @Nullable String specifier) {
-        Settings.Global.putString(context.getContentResolver(), PRIVATE_DNS_SPECIFIER, specifier);
+    public static void setPrivateDnsHostname(@NonNull Context context, @Nullable String specifier,
+            @NonNull GlobalOrUserId target) {
+        if (target.isGlobal()) {
+            Settings.Global.putString(context.getContentResolver(), PRIVATE_DNS_SPECIFIER,
+                    specifier);
+        } else {
+            Settings.Secure.putStringForUser(context.getContentResolver(),
+                    VPN_PRIVATE_DNS_SPECIFIER, specifier, target.getUserId());
+        }
+
     }
 
     /**

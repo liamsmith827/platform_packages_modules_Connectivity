@@ -289,6 +289,27 @@ public class ConnectivitySettingsManager {
      */
     public static final String PRIVATE_DNS_DEFAULT_MODE = "private_dns_default_mode";
 
+    /**
+     * See VPN_PRIVATE_DNS_MODE in {@link android.provider.Settings.Secure}
+     * @hide
+     */
+    @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+    public static final String VPN_PRIVATE_DNS_MODE = "vpn_private_dns_mode";
+
+    /**
+     * See VPN_PRIVATE_DNS_SPECIFIER in {@link android.provider.Settings.Secure}
+     * @hide
+     */
+    @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+    public static final String VPN_PRIVATE_DNS_SPECIFIER = "vpn_private_dns_specifier";
+
+    /**
+     * See VPN_PRIVATE_DNS_DEFAULT_MODE in {@link android.provider.Settings.Secure}
+     * @hide
+     */
+    @SystemApi(client = SystemApi.Client.MODULE_LIBRARIES)
+    public static final String VPN_PRIVATE_DNS_DEFAULT_MODE = "vpn_private_dns_default_mode";
+
     /** Other settings */
 
     /**
@@ -825,15 +846,25 @@ public class ConnectivitySettingsManager {
                 context.getContentResolver(), GLOBAL_HTTP_PROXY_PAC, "" /* value */);
     }
 
+    @PrivateDnsMode
+    public static int getPrivateDnsMode(@NonNull Context context) {
+        return getPrivateDnsMode(context, GlobalOrUserId.GLOBAL);
+    }
+
     /**
      * Get private DNS mode from settings.
      *
      * @param context The Context to query the private DNS mode from settings.
+     * @param target The global physical or per-user VPN private DNS mode.
      * @return A string of private DNS mode.
      */
     @PrivateDnsMode
-    public static int getPrivateDnsMode(@NonNull Context context) {
-        return ConnectivitySettingsUtils.getPrivateDnsMode(context);
+    public static int getPrivateDnsMode(@NonNull Context context, @NonNull GlobalOrUserId target) {
+        return ConnectivitySettingsUtils.getPrivateDnsMode(context, target);
+    }
+
+    public static void setPrivateDnsMode(@NonNull Context context, @PrivateDnsMode int mode) {
+        setPrivateDnsMode(context, mode, GlobalOrUserId.GLOBAL);
     }
 
     /**
@@ -841,20 +872,33 @@ public class ConnectivitySettingsManager {
      *
      * @param context The {@link Context} to set the private DNS mode.
      * @param mode The private dns mode. This should be one of the PRIVATE_DNS_MODE_* constants.
+     * @param target The global physical or per-user VPN private DNS mode.
      */
-    public static void setPrivateDnsMode(@NonNull Context context, @PrivateDnsMode int mode) {
-        ConnectivitySettingsUtils.setPrivateDnsMode(context, mode);
+    public static void setPrivateDnsMode(@NonNull Context context, @PrivateDnsMode int mode,
+            @NonNull GlobalOrUserId target) {
+        ConnectivitySettingsUtils.setPrivateDnsMode(context, mode, target);
+    }
+
+    @Nullable
+    public static String getPrivateDnsHostname(@NonNull Context context) {
+        return getPrivateDnsHostname(context, GlobalOrUserId.GLOBAL);
     }
 
     /**
      * Get specific private dns provider name from {@link Settings}.
      *
      * @param context The {@link Context} to query the setting.
+     * @param target The global physical or per-user VPN private DNS mode.
      * @return The specific private dns provider name, or null if no setting value.
      */
     @Nullable
-    public static String getPrivateDnsHostname(@NonNull Context context) {
-        return ConnectivitySettingsUtils.getPrivateDnsHostname(context);
+    public static String getPrivateDnsHostname(@NonNull Context context,
+            @NonNull GlobalOrUserId target) {
+        return ConnectivitySettingsUtils.getPrivateDnsHostname(context, target);
+    }
+
+    public static void setPrivateDnsHostname(@NonNull Context context, @Nullable String specifier) {
+        setPrivateDnsHostname(context, specifier, GlobalOrUserId.GLOBAL);
     }
 
     /**
@@ -862,9 +906,18 @@ public class ConnectivitySettingsManager {
      *
      * @param context The {@link Context} to set the setting.
      * @param specifier The specific private dns provider name.
+     * @param target The global physical or per-user VPN private DNS mode.
      */
-    public static void setPrivateDnsHostname(@NonNull Context context, @Nullable String specifier) {
-        ConnectivitySettingsUtils.setPrivateDnsHostname(context, specifier);
+    public static void setPrivateDnsHostname(@NonNull Context context, @Nullable String specifier,
+            @NonNull GlobalOrUserId target) {
+        ConnectivitySettingsUtils.setPrivateDnsHostname(context, specifier, target);
+    }
+
+    // This method should be @Nullable, but it can't be changed downstream.
+    @PrivateDnsMode
+    @NonNull
+    public static String getPrivateDnsDefaultMode(@NonNull Context context) {
+        return getPrivateDnsDefaultMode(context, GlobalOrUserId.GLOBAL);
     }
 
     /**
@@ -874,9 +927,20 @@ public class ConnectivitySettingsManager {
      * @return The default private dns mode.
      */
     @PrivateDnsMode
-    @NonNull
-    public static String getPrivateDnsDefaultMode(@NonNull Context context) {
-        return Settings.Global.getString(context.getContentResolver(), PRIVATE_DNS_DEFAULT_MODE);
+    @Nullable
+    public static String getPrivateDnsDefaultMode(@NonNull Context context,
+            @NonNull GlobalOrUserId target) {
+        if (target.isGlobal()) {
+            return Settings.Global.getString(context.getContentResolver(),
+                    PRIVATE_DNS_DEFAULT_MODE);
+        }
+        return Settings.Secure.getStringForUser(context.getContentResolver(),
+                VPN_PRIVATE_DNS_DEFAULT_MODE, target.getUserId());
+    }
+
+    public static void setPrivateDnsDefaultMode(@NonNull Context context,
+            @NonNull @PrivateDnsMode int mode) {
+        setPrivateDnsDefaultMode(context, mode, GlobalOrUserId.GLOBAL);
     }
 
     /**
@@ -887,14 +951,20 @@ public class ConnectivitySettingsManager {
      *             constants.
      */
     public static void setPrivateDnsDefaultMode(@NonNull Context context,
-            @NonNull @PrivateDnsMode int mode) {
+            @NonNull @PrivateDnsMode int mode, @NonNull GlobalOrUserId target) {
         if (!(mode == PRIVATE_DNS_MODE_OFF
                 || mode == PRIVATE_DNS_MODE_OPPORTUNISTIC
                 || mode == PRIVATE_DNS_MODE_PROVIDER_HOSTNAME)) {
             throw new IllegalArgumentException("Invalid private dns mode");
         }
-        Settings.Global.putString(context.getContentResolver(), PRIVATE_DNS_DEFAULT_MODE,
-                getPrivateDnsModeAsString(mode));
+        if (target.isGlobal()) {
+            Settings.Global.putString(context.getContentResolver(), PRIVATE_DNS_DEFAULT_MODE,
+                    getPrivateDnsModeAsString(mode));
+        } else {
+            Settings.Secure.putStringForUser(context.getContentResolver(),
+                    VPN_PRIVATE_DNS_DEFAULT_MODE, getPrivateDnsModeAsString(mode),
+                    target.getUserId());
+        }
     }
 
     /**
