@@ -25,6 +25,9 @@ import static android.net.ConnectivitySettingsManager.PRIVATE_DNS_MODE;
 import static android.net.ConnectivitySettingsManager.PRIVATE_DNS_MODE_OFF;
 import static android.net.ConnectivitySettingsManager.PRIVATE_DNS_MODE_PROVIDER_HOSTNAME;
 import static android.net.ConnectivitySettingsManager.PRIVATE_DNS_SPECIFIER;
+import static android.net.ConnectivitySettingsManager.VPN_PRIVATE_DNS_DEFAULT_MODE;
+import static android.net.ConnectivitySettingsManager.VPN_PRIVATE_DNS_MODE;
+import static android.net.ConnectivitySettingsManager.VPN_PRIVATE_DNS_SPECIFIER;
 import static android.net.resolv.aidl.IDnsResolverUnsolicitedEventListener.VALIDATION_RESULT_FAILURE;
 import static android.net.resolv.aidl.IDnsResolverUnsolicitedEventListener.VALIDATION_RESULT_SUCCESS;
 
@@ -33,8 +36,11 @@ import android.annotation.Nullable;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
+import android.ext.ConnectivityUtil;
+import android.ext.ConnectivityUtil.NetworkType;
 import android.net.ConnectivityManager;
 import android.net.ConnectivitySettingsManager;
+import android.net.GlobalOrUserId;
 import android.net.IDnsResolver;
 import android.net.InetAddresses;
 import android.net.LinkProperties;
@@ -48,10 +54,13 @@ import android.os.Binder;
 import android.os.RemoteException;
 import android.os.ServiceSpecificException;
 import android.os.UserHandle;
+import android.os.UserManager;
 import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.Pair;
+
+import com.android.server.ConnectivityService;
 
 import java.net.InetAddress;
 import java.util.ArrayList;
@@ -66,6 +75,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+// TODO: Review [C]. Which part bypasses private DNS?
 /**
  * Encapsulate the management of DNS settings for networks.
  *
@@ -134,25 +144,32 @@ public class DnsManager {
     /**
      * Get PrivateDnsConfig.
      */
-    public static PrivateDnsConfig getPrivateDnsConfig(Context context) {
-        final int mode = ConnectivitySettingsManager.getPrivateDnsMode(context);
+    public static PrivateDnsConfig getPrivateDnsConfig(Context context, GlobalOrUserId target) {
+        final int mode = ConnectivitySettingsManager.getPrivateDnsMode(context, target);
 
         final boolean useTls = mode != PRIVATE_DNS_MODE_OFF;
 
         if (PRIVATE_DNS_MODE_PROVIDER_HOSTNAME == mode) {
-            final String specifier = getStringSetting(context.getContentResolver(),
-                    PRIVATE_DNS_SPECIFIER);
+            final String specifier = ConnectivitySettingsManager.getPrivateDnsHostname(context,
+                    target);
             return new PrivateDnsConfig(specifier, null);
         }
 
         return new PrivateDnsConfig(useTls);
     }
 
-    public static Uri[] getPrivateDnsSettingsUris() {
+    public static Uri[] getPrivateDnsSettingsUris(NetworkType networkType) {
+        if (networkType == NetworkType.PHYSICAL) {
+            return new Uri[]{
+                    Settings.Global.getUriFor(PRIVATE_DNS_DEFAULT_MODE),
+                    Settings.Global.getUriFor(PRIVATE_DNS_MODE),
+                    Settings.Global.getUriFor(PRIVATE_DNS_SPECIFIER),
+            };
+        }
         return new Uri[]{
-            Settings.Global.getUriFor(PRIVATE_DNS_DEFAULT_MODE),
-            Settings.Global.getUriFor(PRIVATE_DNS_MODE),
-            Settings.Global.getUriFor(PRIVATE_DNS_SPECIFIER),
+                Settings.Secure.getUriFor(VPN_PRIVATE_DNS_DEFAULT_MODE),
+                Settings.Secure.getUriFor(VPN_PRIVATE_DNS_MODE),
+                Settings.Secure.getUriFor(VPN_PRIVATE_DNS_SPECIFIER),
         };
     }
 
@@ -257,26 +274,61 @@ public class DnsManager {
     private final Map<Integer, LinkProperties> mLinkPropertiesMap;
     private final Map<Integer, NetworkCapabilities> mNetworkCapabilitiesMap;
 
+    private final UserManager mUserManager;
+
     private int mSampleValidity;
     private int mSuccessThreshold;
     private int mMinSamples;
     private int mMaxSamples;
 
+    @Nullable private NetworkAgentInfo mDefaultNetwork;
+
     public DnsManager(Context ctx, IDnsResolver dnsResolver) {
         mContext = ctx;
         mContentResolver = mContext.getContentResolver();
         mDnsResolver = dnsResolver;
+
         mPrivateDnsMap = new ConcurrentHashMap<>();
         mPrivateDnsValidationMap = new HashMap<>();
         mLinkPropertiesMap = new HashMap<>();
         mNetworkCapabilitiesMap = new HashMap<>();
 
+        mUserManager = (UserManager) mContext.getSystemService(Context.USER_SERVICE);
+
         // TODO: Create and register ContentObservers to track every setting
         // used herein, posting messages to respond to changes.
     }
 
-    public PrivateDnsConfig getPrivateDnsConfig() {
-        return getPrivateDnsConfig(mContext);
+    public PrivateDnsConfig getPrivateDnsConfig(GlobalOrUserId target) {
+        return getPrivateDnsConfig(mContext, target);
+    }
+
+    /**
+     * @return The network's target (global or a specific userId), or null if the target can't be
+     *         determined.
+     */
+    public @Nullable GlobalOrUserId getNetworkTarget(@NonNull NetworkAgentInfo nai) {
+        if (nai.isVPN()) {
+            // If it's not one of the supported types then we can't be sure how to get the correct
+            // config.
+            ConnectivityService.checkSupportedVpnType(nai);
+
+            // Both TYPE_VPN_PLATFORM (VpnManager) and TYPE_VPN_SERVICE (VpnService) VPN types are
+            // created by VpnManagerService, where Vpn.getAppUid() is the source of the owner uid.
+            // Per this method, the ownerUid will always be positive unless the package can't be
+            // found. If the package can't be found then either the VPN app was uninstalled at the
+            // the same time the tunnel was being created, or there's a bug.
+            // For TYPE_VPN_PLATFORM, the owner uid is always system_server, so the VPN private DNS
+            // config of user 0 applies to these VPNs, regardless of the user that created the
+            // platform VPN.
+            int ownerUid = nai.networkCapabilities.getOwnerUid();
+            if (ownerUid < 0) {
+                Log.e(TAG, "VPN target not found due to missing ownerUid");
+                return null;
+            }
+            return GlobalOrUserId.userId(UserHandle.getUserId(ownerUid));
+        }
+        return GlobalOrUserId.GLOBAL;
     }
 
     public void removeNetwork(Network network) {
@@ -354,6 +406,14 @@ public class DnsManager {
         sendDnsConfigurationForNetwork(netId);
     }
 
+    public void setDefaultNetwork(@Nullable NetworkAgentInfo network) {
+        mDefaultNetwork = network;
+    }
+
+    public @Nullable NetworkAgentInfo getDefaultNetwork() {
+        return mDefaultNetwork;
+    }
+
     /**
      * Send dns configuration parameters to resolver for a given network.
      */
@@ -361,6 +421,7 @@ public class DnsManager {
         final LinkProperties lp = mLinkPropertiesMap.get(netId);
         final NetworkCapabilities nc = mNetworkCapabilitiesMap.get(netId);
         if (lp == null || nc == null) return;
+
         updateParametersSettings();
         final ResolverParamsParcel paramsParcel = new ResolverParamsParcel();
 
@@ -384,8 +445,9 @@ public class DnsManager {
         paramsParcel.servers = makeStrings(lp.getDnsServers());
         paramsParcel.domains = getDomainStrings(lp.getDomains());
         paramsParcel.tlsName = strictMode ? privateDnsCfg.hostname : "";
+
         paramsParcel.tlsServers =
-                strictMode ? makeStrings(getReachableAddressList(privateDnsCfg.ips, lp))
+                strictMode ? createStrictModeServers(nc, lp, privateDnsCfg, mDefaultNetwork)
                 : useTls ? paramsParcel.servers  // Opportunistic
                 : new String[0];            // Off
         paramsParcel.transportTypes = nc.getTransportTypes();
@@ -414,9 +476,112 @@ public class DnsManager {
     }
 
     /**
+     * @return The IP addresses from privateDnsCfg that the system DNS resolver can reach when doing
+     *         doing private DNS on the network whose NetworkCapabilities are nc and LinkProperties
+     *         are lp.
+     */
+    private String[] createStrictModeServers(NetworkCapabilities nc, LinkProperties lp,
+            PrivateDnsConfig privateDnsCfg, @Nullable NetworkAgentInfo defaultNetwork) {
+        String[] strictModeServers;
+
+        // If it's a VPN without lockdown then traffic can go over the VPN or the default
+        // network.
+        if (isVpnWithoutLockdown(mContext, nc)) {
+            List<InetAddress> reachableIps = getReachableAddressList(privateDnsCfg.ips, lp);
+
+            // TODO: Investigate whether default network reachable IPs should always be included.
+            // We would need to remove duplicates and sort them, instead of letting DnsResolver sort
+            // them. Doing it for DoH is definitely fine as it only ever uses the first server. DoT
+            // would attempt to validate every server which would mean bypassing the VPN where
+            // possibly avoidable.
+            if (reachableIps.isEmpty() && defaultNetwork != null) {
+                reachableIps.addAll(getReachableAddressList(privateDnsCfg.ips,
+                        defaultNetwork.linkProperties));
+            }
+
+            strictModeServers = makeStrings(reachableIps);
+        } else {
+            // If it's a physical network or lockdown VPN then traffic can only go over that
+            // particular network.
+            strictModeServers = makeStrings(getReachableAddressList(privateDnsCfg.ips, lp));
+        }
+
+        return strictModeServers;
+    }
+
+    /**
+     * @return The netIds of non-lockdown VPNs which are using strict private DNS. Networks that
+     *         have not yet had their DNS configuration sent to DnsResolver are excluded.
+     */
+    public List<Integer> getNonLockdownVpnsUsingStrictPrivateDns() {
+        List<Integer> netIds = new ArrayList<>();
+        // While there could be matching networks that aren't in mNetworkCapabilitiesMap, they can't
+        // have had their DNS configuration sent to DnsResolver because
+        // sendDnsConfigurationForNetwork() exits early.
+        for (Map.Entry<Integer, NetworkCapabilities> entry : mNetworkCapabilitiesMap.entrySet()) {
+            final PrivateDnsConfig privateDnsCfg = mPrivateDnsMap.getOrDefault(
+                    entry.getKey(), PRIVATE_DNS_OFF);
+            // Checking private DNS first ensures isVpnWithoutLockdown() is not passed a network
+            // with a missing owner uid, as these networks would have always returned a null target
+            // for which there is no private DNS config.
+            // Similar to above, not being in mLinkPropertiesMap results in
+            // sendDnsConfigurationForNetwork() exiting early, so skip those.
+            if (privateDnsCfg.inStrictMode()
+                    && mLinkPropertiesMap.get(entry.getKey()) != null
+                    && isVpnWithoutLockdown(mContext, entry.getValue())) {
+                netIds.add(entry.getKey());
+            }
+        }
+        return netIds;
+    }
+
+    private boolean isVpnWithoutLockdown(@NonNull Context context,
+            @NonNull NetworkCapabilities capabilities) {
+        boolean isVpn = capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN);
+        if (!isVpn) {
+            return false;
+        }
+
+        int ownerUid = capabilities.getOwnerUid();
+        // Refer to getNetworkTarget().
+        if (ownerUid < 0) {
+            // We ensure this isn't reached by only calling this method when mPrivateDnsConfigMap
+            // contains an entry for the netId, as that can only happen if getNetworkTarget()
+            // returns a non-null value.
+            throw new IllegalArgumentException("caller must ensure capabilities has an ownerUid");
+        }
+
+        // This considers the service VPN lockdown status, not the platform VPN lockdown status.
+        // As a result, platform VPNs will always return true.
+        return !ConnectivityUtil.isLockdownVpnEnabled(context, UserHandle.getUserId(ownerUid));
+    }
+
+    public boolean shouldSendStrictModeUpdate(int netId, LinkProperties oldLp,
+            LinkProperties newLp) {
+        return shouldSendStrictModeUpdate(netId, oldLp, newLp, mDefaultNetwork, mDefaultNetwork);
+    }
+
+    public boolean shouldSendStrictModeUpdate(int netId, LinkProperties oldLp,
+            LinkProperties newLp, @Nullable NetworkAgentInfo oldDefaultNetwork,
+            @Nullable NetworkAgentInfo newDefaultNetwork) {
+        NetworkCapabilities nc = mNetworkCapabilitiesMap.get(netId);
+        PrivateDnsConfig privateDnsconfig = mPrivateDnsMap.getOrDefault(netId, PRIVATE_DNS_OFF);
+        if (nc == null || !privateDnsconfig.inStrictMode()) {
+            return false;
+        }
+
+        String[] oldReachableServers = createStrictModeServers(nc, oldLp, privateDnsconfig,
+                oldDefaultNetwork);
+        String[] newReachableServers = createStrictModeServers(nc, newLp, privateDnsconfig,
+                newDefaultNetwork);
+
+        return !Arrays.equals(oldReachableServers, newReachableServers);
+    }
+
+    /**
      * Flush DNS caches and events work before boot has completed.
      */
-    public void flushVmDnsCache() {
+    public void flushVmDnsCache(NetworkAgentInfo nai) {
         /*
          * Tell the VMs to toss their DNS caches
          */
@@ -427,11 +592,46 @@ public class DnsManager {
          */
         intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
         final long ident = Binder.clearCallingIdentity();
-        try {
-            mContext.sendBroadcastAsUser(intent, UserHandle.ALL);
-        } finally {
-            Binder.restoreCallingIdentity(ident);
+
+        List<UserHandle> flushTargets = getDnsCacheFlushTargets(nai);
+        for (UserHandle user : flushTargets) {
+            mContext.sendBroadcastAsUser(intent, user);
         }
+
+        Binder.restoreCallingIdentity(ident);
+    }
+
+    /**
+     * @return The UserHandles that should have their VM DNS caches flushed as a result of a change
+     *         in the DNS servers of nai.
+     */
+    public List<UserHandle> getDnsCacheFlushTargets(@NonNull NetworkAgentInfo nai) {
+        List<UserHandle> flushTargets = new ArrayList<>();
+
+        GlobalOrUserId networkTarget = getNetworkTarget(nai);
+        if (networkTarget == null) {
+            return flushTargets;
+        }
+
+        if (networkTarget.isGlobal()) {
+            for (UserHandle user : mUserManager.getUserHandles(true)) {
+                // Assume any user that doesn't have a lockdown VPN can use the global physical
+                // networks for DNS. This isn't technically the case because VPNs have a
+                // secure/bypassable attribute that restricts physical network access for DNS.
+                // A problem with doing it this way is that system apps/components that are under
+                // a lockdown VPN can still do DNS on the physical networks. This is unlikely to be
+                // an issue in practice.
+                if (!ConnectivityUtil.isLockdownVpnEnabled(mContext, user.getIdentifier())) {
+                    if (mUserManager.isUserRunning(user)) {
+                        flushTargets.add(user);
+                    }
+                }
+            }
+        } else {
+            flushTargets.add(networkTarget.getUserHandle());
+        }
+
+        return flushTargets;
     }
 
     private void updateParametersSettings() {

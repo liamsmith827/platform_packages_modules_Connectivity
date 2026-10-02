@@ -45,6 +45,7 @@ import static org.mockito.Mockito.when;
 import android.annotation.Nullable;
 import android.content.Context;
 import android.net.ConnectivitySettingsManager;
+import android.net.GlobalOrUserId;
 import android.net.IDnsResolver;
 import android.net.IpPrefix;
 import android.net.LinkAddress;
@@ -138,9 +139,9 @@ public class DnsManagerTest {
     @Test
     public void testTrackedValidationUpdates() throws Exception {
         mDnsManager.updatePrivateDns(new Network(TEST_NETID),
-                mDnsManager.getPrivateDnsConfig());
+                mDnsManager.getPrivateDnsConfig(GlobalOrUserId.GLOBAL));
         mDnsManager.updatePrivateDns(new Network(TEST_NETID_ALTERNATE),
-                mDnsManager.getPrivateDnsConfig());
+                mDnsManager.getPrivateDnsConfig(GlobalOrUserId.GLOBAL));
         LinkProperties lp = new LinkProperties();
         lp.setInterfaceName(TEST_IFACENAME);
         lp.addDnsServer(InetAddress.getByName("3.3.3.3"));
@@ -237,7 +238,7 @@ public class DnsManagerTest {
 
         // Validation event has untracked netId
         mDnsManager.updatePrivateDns(new Network(TEST_NETID),
-                mDnsManager.getPrivateDnsConfig());
+                mDnsManager.getPrivateDnsConfig(GlobalOrUserId.GLOBAL));
         mDnsManager.updateCapabilitiesForNetwork(TEST_NETID, nc);
         mDnsManager.noteDnsServersForNetwork(TEST_NETID, lp);
         mDnsManager.flushVmDnsCache();
@@ -288,7 +289,7 @@ public class DnsManagerTest {
         // Turn private DNS mode off
         ConnectivitySettingsManager.setPrivateDnsMode(mCtx, PRIVATE_DNS_MODE_OFF);
         mDnsManager.updatePrivateDns(new Network(TEST_NETID),
-                mDnsManager.getPrivateDnsConfig());
+                mDnsManager.getPrivateDnsConfig(GlobalOrUserId.GLOBAL));
         mDnsManager.updateCapabilitiesForNetwork(TEST_NETID, nc);
         mDnsManager.noteDnsServersForNetwork(TEST_NETID, lp);
         mDnsManager.flushVmDnsCache();
@@ -304,14 +305,14 @@ public class DnsManagerTest {
     @Test
     public void testOverrideDefaultMode() throws Exception {
         // Hard-coded default is opportunistic mode.
-        final PrivateDnsConfig cfgAuto = DnsManager.getPrivateDnsConfig(mCtx);
+        final PrivateDnsConfig cfgAuto = DnsManager.getPrivateDnsConfig(mCtx, GlobalOrUserId.GLOBAL);
         assertEquals(PRIVATE_DNS_MODE_OPPORTUNISTIC, cfgAuto.mode);
         assertEquals("", cfgAuto.hostname);
         assertEquals(new InetAddress[0], cfgAuto.ips);
 
         // Pretend a gservices push sets the default to "off".
         ConnectivitySettingsManager.setPrivateDnsDefaultMode(mCtx, PRIVATE_DNS_MODE_OFF);
-        final PrivateDnsConfig cfgOff = DnsManager.getPrivateDnsConfig(mCtx);
+        final PrivateDnsConfig cfgOff = DnsManager.getPrivateDnsConfig(mCtx, GlobalOrUserId.GLOBAL);
         assertEquals(PRIVATE_DNS_MODE_OFF, cfgOff.mode);
         assertEquals("", cfgOff.hostname);
         assertEquals(new InetAddress[0], cfgOff.ips);
@@ -319,7 +320,8 @@ public class DnsManagerTest {
         // Strict mode still works.
         ConnectivitySettingsManager.setPrivateDnsMode(mCtx, PRIVATE_DNS_MODE_PROVIDER_HOSTNAME);
         ConnectivitySettingsManager.setPrivateDnsHostname(mCtx, "strictmode.com");
-        final PrivateDnsConfig cfgStrict = DnsManager.getPrivateDnsConfig(mCtx);
+        final PrivateDnsConfig cfgStrict = DnsManager.getPrivateDnsConfig(mCtx,
+                GlobalOrUserId.GLOBAL);
         assertEquals(PRIVATE_DNS_MODE_PROVIDER_HOSTNAME, cfgStrict.mode);
         assertEquals("strictmode.com", cfgStrict.hostname);
         assertEquals(new InetAddress[0], cfgStrict.ips);
@@ -446,7 +448,7 @@ public class DnsManagerTest {
         assertEquals(new InetAddress[0], privateDnsCfg.ips);
 
         // An entry with default PrivateDnsConfig is added to the PrivateDnsConfig map.
-        mDnsManager.updatePrivateDns(network, mDnsManager.getPrivateDnsConfig());
+        mDnsManager.updatePrivateDns(network, mDnsManager.getPrivateDnsConfig(GlobalOrUserId.GLOBAL));
         mDnsManager.noteDnsServersForNetwork(TEST_NETID, lp);
         mDnsManager.updatePrivateDnsValidation(
                 new DnsManager.PrivateDnsValidationUpdate(TEST_NETID, dnsAddr, "",
